@@ -10,7 +10,7 @@
 #  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #  GNU General Public License for more details.
 #
-#  You should have received a copy of the GNU General Public License
+#  You should have received a copy of the² GNU General Public License
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #  All rights reserved.
 #  ***** GPL LICENSE BLOCK *****
@@ -91,6 +91,21 @@ fmt_BSPTexInfo = '<8f2I'
 
 BSPMipTex = namedtuple('BSPMipTex', 'name, width, height, ofs1, ofs2, ofs4, ofs8')
 fmt_BSPMipTex = '<16s6I'
+bspmiptex_size = struct.calcsize(fmt_BSPMipTex)
+bspmiptex_struct = struct.Struct(fmt_BSPMipTex)
+
+WADEntry = namedtuple ('WADEntry',
+('nFilePos', 
+'nDiskSize', 
+'nSize', 'nType', 
+'bCompression', 
+'nDummy', 
+'szName')
+)
+
+fmt_wadentry = 'iiib?h16s'
+wadentry_size = struct.calcsize(fmt_wadentry)
+wadentry_struct = struct.Struct(fmt_wadentry)
 
 # surfaces with these textures will be ignored
 ignored_texnames = (
@@ -125,9 +140,11 @@ sky_prefix = "sky"
 fullbright_index = 224 # start of fullbright colors in palette
 transparent_index = 255 # transparent color
 
+wad_texs = {}
+
 # functions
 def print_debug(string):
-    debug = False
+    debug = True
     if debug:
         print(string)
 
@@ -191,6 +208,69 @@ def generate_mask(fg_indices, width, height, black_background=True):
 
     return mask_pixels
 
+def load_wad(tex_name):
+    with open('/media/1tera/SteamLibrary/steamapps/common/Half-Life/valve/halflife.wad', 'rb') as file: 
+        (wad_id, num_miptex, miptex_ofs) = struct.unpack('<4sII', file.read(12))
+
+        print("{} {} {}".format(wad_id, num_miptex, miptex_ofs))
+
+        # get the list of miptex in the miptex lump (basically a simplified .WAD file inside the bsp)
+        for wad_id in range(num_miptex):
+            file.seek(miptex_ofs + (wad_id * wadentry_size))
+            wadentry_data = file.read(wadentry_size)
+            wadentry = WADEntry._make(wadentry_struct.unpack_from(wadentry_data))
+            #print(wadentry)
+
+            file.seek(wadentry.nFilePos)
+            bspmiptex = BSPMipTex._make(bspmiptex_struct.unpack_from(file.read(bspmiptex_size)))
+            pal_offset = wadentry.nFilePos + bspmiptex.ofs8 + (bspmiptex.height//8 * bspmiptex.width//8) + 2
+
+            # because some map compilers do not pad strings with 0s, need to handle that
+            for i, b in enumerate(bspmiptex.name):
+                if b == 0:
+                    filename = bspmiptex.name[0:i].decode('ascii')
+                    break
+
+            if not filename == tex_name:
+                continue
+
+            print("%s" % filename)
+
+            texture_item = dict(name=filename, width=bspmiptex.width, height=bspmiptex.height,image=None, mask=None, is_emissive=False, use_alpha=False)
+
+            file.seek(pal_offset)
+            palette = []
+
+            for j in range(256):
+
+                (r,g,b) = struct.unpack('BBB', file.read(struct.calcsize('BBB')))
+                palette.append((r,g,b))
+                #print("%d: r=%d g=%d b%d" % (j,r,g,b))
+
+            file.seek(wadentry.nFilePos + bspmiptex.ofs1)
+
+            miptex_size = bspmiptex.height * bspmiptex.width
+            pixeldata =struct.unpack('<%dB' % miptex_size, file.read(miptex_size))
+
+            pixels = []
+            for y in reversed(range(0, bspmiptex.height)):
+                for x in range(0, bspmiptex.width):
+                    pixel = pixeldata[x + (y*bspmiptex.width)]
+                    color = palette[pixel]
+                    pixels.append(color[0] / 256.0)
+                    pixels.append(color[1] / 256.0)
+                    pixels.append(color[2] / 256.0)
+                    pixels.append(1.0)
+
+             # create an image and save it
+            image = bpy.data.images.new(filename, width=bspmiptex.width, height=bspmiptex.height)
+            image.pixels = pixels
+            texture_item['image'] = image
+            texture_item['is_emissive'] = False
+            texture_item['use_alpha'] = False
+
+            return texture_item
+            
 
 def load_textures(context, filepath, brightness_adjust, load_miptex=True):
     with open(filepath, 'rb') as file:
@@ -231,8 +311,9 @@ def load_textures(context, filepath, brightness_adjust, load_miptex=True):
 
             # Only save the basic texture information
             if not load_miptex:
-                texture_data.append(texture_item)
-                continue
+                    print('load %s from wad' % miptex_name)
+                    texture_data.append(load_wad(miptex_name))
+                    continue
 
             # get the paletized image pixels
             # if the miptex list is corrupted, make an empty texture to keep id's in order
@@ -493,6 +574,7 @@ def create_materials(texture_data, options):
 
 
 def import_bsp(context, filepath, options):
+
     # Clear selection and reset cursor to prevent weirdness
     if bpy.context.active_object:
         bpy.ops.object.mode_set(mode='OBJECT')
